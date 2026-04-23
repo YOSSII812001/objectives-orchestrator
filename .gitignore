@@ -1,0 +1,77 @@
+# =============================================================================
+# objectives-orchestrator .gitignore
+# =============================================================================
+
+# --- 秘匿情報（絶対にコミットしない） ---
+.env
+*.key
+*.pem
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- 仮想環境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- ランタイム状態（自動生成、個人固有） ---
+state/cycle.lock
+state/query_history.json
+state/gap_analysis_state.json
+state/progress/*
+!state/progress/.gitkeep
+state/judge_reports/*
+!state/judge_reports/.gitkeep
+state/observation_reports/*
+!state/observation_reports/.gitkeep
+state/search-hints/*
+!state/search-hints/.gitkeep
+
+# --- ログ ---
+logs/*.log
+logs/*.log.*
+!logs/.gitkeep
+
+# --- 個人タスクメモ（公開不要） ---
+tasks/handoff_*.md
+tasks/lessons.md
+!tasks/todo.md
+
+# --- raw HTML バックアップ ---
+raw/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- バックアップファイル ---
+*.bak
+*.orig
+*~
