@@ -6,12 +6,30 @@ MVP: Brave Search API + httpx（ページ取得）
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from urllib.parse import quote_plus
 
 import httpx
 
 from config import BRAVE_API_KEY, PAGE_FETCH_TIMEOUT, QUERY_COOLDOWN_HOURS
 from query_history import should_skip as _query_should_skip, record as _query_record
+
+
+@dataclass
+class SearchBatch:
+    """検索1回分の結果と状態。
+
+    status:
+      - "ok": API呼び出し成功（結果0件も含む）
+      - "cooldown": クエリがクールダウン中のためスキップ
+      - "422": Brave Search 422 (Unprocessable) — 日本語クエリ等で頻発
+      - "429": レート制限
+      - "error": その他の接続・HTTPエラー
+
+    呼び出し側は status を見て「新規0件として飽和計上するか」を判定する。
+    """
+    results: list[dict] = field(default_factory=list)
+    status: str = "ok"
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +41,19 @@ if not BRAVE_API_KEY:
     )
 
 
-def search_google(query: str, lang: str = "ja") -> list[dict]:
-    """Web検索を実行し、結果リストを返す。
+def search_google(query: str, lang: str = "ja") -> SearchBatch:
+    """Web検索を実行し、結果と状態を返す。
 
     MVP: Brave Search API を使用（Google検索ではない）
-    返り値: [{"title": "...", "url": "...", "snippet": "..."}]
+    返り値: SearchBatch(results=[{"title","url","snippet"}...], status=...)
 
     同一クエリが QUERY_COOLDOWN_HOURS 以内に実行済みの場合は
-    API呼び出しをスキップして空リストを返す（API quota節約）。
+    API呼び出しをスキップし、status="cooldown" で返す（API quota節約）。
     """
     # クールダウン判定
     if _query_should_skip(query, cooldown_hours=QUERY_COOLDOWN_HOURS):
         logger.info("クエリスキップ（クールダウン中）: %s", query)
-        return []
+        return SearchBatch(status="cooldown")
 
     params = {
         "q": query,
@@ -67,7 +85,7 @@ def search_google(query: str, lang: str = "ja") -> list[dict]:
 
         # レート制限: 1秒1リクエスト（無料枠）
         time.sleep(1.2)
-        return results
+        return SearchBatch(results=results, status="ok")
 
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
@@ -75,19 +93,19 @@ def search_google(query: str, lang: str = "ja") -> list[dict]:
             logger.warning("Brave Search レート制限。60秒待機。")
             _query_record(query, 0, status="429")
             time.sleep(60)
-            return []
+            return SearchBatch(status="429")
         if status_code == 422:
             # 日本語クエリ等で繰り返し発生 → 24時間クールダウン
             logger.error("Brave Search APIエラー: %s", e)
             _query_record(query, 0, status="422")
-            return []
+            return SearchBatch(status="422")
         logger.error("Brave Search APIエラー: %s", e)
         _query_record(query, 0, status="error")
-        return []
+        return SearchBatch(status="error")
     except httpx.HTTPError as e:
         logger.error("Brave Search 接続エラー: %s", e)
         _query_record(query, 0, status="error")
-        return []
+        return SearchBatch(status="error")
 
 
 def fetch_page_text(url: str) -> str | None:

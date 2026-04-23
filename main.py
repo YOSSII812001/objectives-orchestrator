@@ -22,6 +22,29 @@ from config import (
 )
 
 
+def _hints_newer_than_last_cycle(objective_id: str, last_cycle_at: str | None) -> bool:
+    """search-hints が last_cycle_at より後に生成されていれば True。
+
+    飽和検知で止まった objective でも、新 hints が来ていれば 1 サイクル試行させる
+    ための自動回復トリガー。
+    """
+    import json as _json
+    from config import SEARCH_HINTS_DIR
+    hints_file = SEARCH_HINTS_DIR / f"{objective_id}.json"
+    if not hints_file.exists():
+        return False
+    try:
+        data = _json.loads(hints_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    generated_at = data.get("generated_at")
+    if not generated_at:
+        return False
+    if not last_cycle_at:
+        return True
+    return generated_at > last_cycle_at
+
+
 def setup_logging():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
@@ -47,6 +70,7 @@ def run_cycle():
     from inbox_writer import write_to_inbox
     from progress_tracker import normalize_url, is_valid_url
     from hints_reader import get_hint_queries, get_knowledge_gaps
+    from query_history import should_skip as query_on_cooldown
 
     logger = logging.getLogger("main")
 
@@ -86,11 +110,19 @@ def run_cycle():
             # TTLパージ
             tracker.purge_old_urls(PROGRESS_TTL_DAYS, PROGRESS_MAX_URLS)
 
-            # 飽和チェック
+            # 飽和チェック（ただし fresh hints が到着していれば自動回復）
             if obj.saturation_threshold > 0 and tracker.data["consecutive_zero_results"] >= obj.saturation_threshold:
-                logger.info("飽和検知 (%d回連続0件)。自動pause: %s", tracker.data["consecutive_zero_results"], obj.id)
-                # TODO: ファイルのstatusをpausedに更新
-                continue
+                if _hints_newer_than_last_cycle(obj.id, tracker.data.get("last_cycle_at")):
+                    logger.info(
+                        "飽和検知 (%d回連続0件) だが fresh hints 到着済み → 飽和カウンタをリセットして再試行: %s",
+                        tracker.data["consecutive_zero_results"], obj.id,
+                    )
+                    tracker.data["consecutive_zero_results"] = 0
+                    tracker.save()
+                else:
+                    logger.info("飽和検知 (%d回連続0件)。自動pause: %s", tracker.data["consecutive_zero_results"], obj.id)
+                    # TODO: ファイルのstatusをpausedに更新
+                    continue
 
             # サイクル上限チェック
             if obj.max_cycles > 0 and tracker.data["cycles_completed"] >= obj.max_cycles:
@@ -104,10 +136,41 @@ def run_cycle():
             # 過去のクエリ一覧
             prev_queries = [q["query"] for q in tracker.data.get("queries_history", [])[-20:]]
 
+            pre_zero_reason: str | None = None
+
             # 検索クエリ生成
             if hint_queries:
-                queries = [{"query": h["query"], "lang": h.get("search_lang", obj.language)} for h in hint_queries[:MAX_QUERIES_PER_OBJECTIVE]]
-                logger.info("search-hintsから%d件のクエリを使用", len(queries))
+                # cooldown中のhintsを除外してから上限で切り詰め（先頭3本がクールダウンだと
+                # 4本目以降の新鮮候補に到達できない旧挙動を修正）
+                fresh_hints = [h for h in hint_queries if not query_on_cooldown(h["query"])]
+                queries = [
+                    {"query": h["query"], "lang": h.get("search_lang", obj.language)}
+                    for h in fresh_hints[:MAX_QUERIES_PER_OBJECTIVE]
+                ]
+
+                # 全hintsクールダウン中 → Gap分析を強制再実行して新 hints を取得
+                if not queries:
+                    logger.info("全hintsクールダウン中 → Gap分析を強制再実行")
+                    try:
+                        from gap_analyzer import run_gap_analysis
+                        run_gap_analysis(force=True)
+                        hint_queries = get_hint_queries(obj.id)
+                        fresh_hints = [h for h in hint_queries if not query_on_cooldown(h["query"])]
+                        queries = [
+                            {"query": h["query"], "lang": h.get("search_lang", obj.language)}
+                            for h in fresh_hints[:MAX_QUERIES_PER_OBJECTIVE]
+                        ]
+                    except Exception:
+                        logger.exception("Gap分析強制再実行で例外（サイクルは継続）")
+
+                if queries:
+                    logger.info(
+                        "search-hintsから%d件のクエリを使用（cooldown除外後 / 元hints %d件）",
+                        len(queries), len(hint_queries),
+                    )
+                else:
+                    pre_zero_reason = "cooldown_only"
+                    logger.info("Gap分析再実行後も全クエリがクールダウン中 → cooldown_only")
             else:
                 queries = generate_search_queries(
                     objective_title=obj.title,
@@ -121,18 +184,22 @@ def run_cycle():
                 logger.info("LM Studioから%d件のクエリを生成", len(queries))
 
             if not queries:
-                logger.warning("検索クエリ生成失敗。次の目的へ。")
-                tracker.finish_cycle(0)
+                if pre_zero_reason is None:
+                    logger.warning("検索クエリ生成失敗。次の目的へ。")
+                tracker.finish_cycle(0, zero_reason=pre_zero_reason)
                 continue
 
             cycle_new_results = 0
+            batch_statuses: list[str] = []
 
             for q in queries:
                 query_text = q.get("query", str(q))
                 query_lang = q.get("lang", obj.language)
 
-                # Google検索
-                search_results = search_google(query_text, lang=query_lang)
+                # Web検索（SearchBatch: results + status）
+                batch = search_google(query_text, lang=query_lang)
+                batch_statuses.append(batch.status)
+                search_results = batch.results
                 accepted = 0
 
                 for result in search_results:
@@ -206,9 +273,23 @@ def run_cycle():
                 if cycle_new_results >= obj.max_results_per_cycle:
                     break
 
-            tracker.finish_cycle(cycle_new_results)
+            # "新規0件" の原因を分類して飽和カウンタに計上するかを判定
+            final_zero_reason: str | None = None
+            if cycle_new_results == 0 and batch_statuses:
+                if all(s == "cooldown" for s in batch_statuses):
+                    final_zero_reason = "cooldown_only"
+                elif all(s == "422" for s in batch_statuses):
+                    final_zero_reason = "all_422"
+                elif not any(s == "ok" for s in batch_statuses):
+                    # cooldown/422/429/error が混在し、成功0 → 観測不能
+                    final_zero_reason = "search_failed"
+
+            tracker.finish_cycle(cycle_new_results, zero_reason=final_zero_reason)
             total_inbox_written += cycle_new_results
-            logger.info("=== 目的処理完了: %s - 新規%d件 ===", obj.title, cycle_new_results)
+            logger.info(
+                "=== 目的処理完了: %s - 新規%d件 (statuses=%s, zero_reason=%s) ===",
+                obj.title, cycle_new_results, batch_statuses, final_zero_reason,
+            )
 
         # サイクルサマリー
         inbox_count = len(list(INBOX_DIR.glob("*.md"))) if INBOX_DIR.exists() else 0

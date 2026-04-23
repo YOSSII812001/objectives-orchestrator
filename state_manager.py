@@ -117,13 +117,29 @@ class UrlStageTracker:
         )
         self.save()
 
-    def finish_cycle(self, new_results: int):
+    # 飽和カウンタに計上しない "観測不能" な 0件理由
+    NON_SATURATING_ZERO_REASONS = {"cooldown_only", "all_422", "search_failed"}
+
+    def finish_cycle(self, new_results: int, zero_reason: str | None = None):
+        """サイクル完了を記録。
+
+        zero_reason が NON_SATURATING_ZERO_REASONS のいずれかの場合、
+        consecutive_zero_results は増やさない（検索が実行できていないため
+        飽和と区別できない — "新規0件" と "観測不能" を混同しないための措置）。
+        """
         self.data["cycles_completed"] += 1
         self.data["last_cycle_at"] = datetime.now().isoformat()
-        if new_results == 0:
-            self.data["consecutive_zero_results"] += 1
-        else:
+        if new_results > 0:
             self.data["consecutive_zero_results"] = 0
+        elif zero_reason in self.NON_SATURATING_ZERO_REASONS:
+            logger.info(
+                "zero_reason=%s のため飽和カウンタを据え置き (現在 %d回)",
+                zero_reason, self.data["consecutive_zero_results"],
+            )
+        else:
+            self.data["consecutive_zero_results"] += 1
+        if zero_reason:
+            self.data["last_zero_reason"] = zero_reason
         self.save()
 
     def purge_old_urls(self, ttl_days: int, max_urls: int):
