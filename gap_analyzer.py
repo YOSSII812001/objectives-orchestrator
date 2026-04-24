@@ -22,6 +22,7 @@ from config import (
 )
 from lm_client import _chat_json
 from objectives import Objective, load_objectives
+from query_history import recent_unique_queries
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,12 @@ def generate_hints_for_objective(obj: Objective, related_stubs: list[dict]) -> d
     interests_text = "\n".join(f"- {i}" for i in obj.interests) or "（なし）"
     exclusions_text = "\n".join(f"- {e}" for e in obj.exclusions) or "（なし）"
 
+    # 直近ユニーク10クエリを avoid-list として渡し、クエリ再生産を抑制。
+    # Phase 1 では「同じ記事」問題の真因は観測構造だったが、
+    # Phase 2 では生成側にも avoid-list を明示することで多様性を担保する。
+    avoid_queries = recent_unique_queries(limit=10, ok_only=True)
+    avoid_text = "\n".join(f"- {q}" for q in avoid_queries) or "（なし）"
+
     messages = [
         {
             "role": "system",
@@ -140,25 +147,36 @@ def generate_hints_for_objective(obj: Objective, related_stubs: list[dict]) -> d
 ## 現在stub状態の関連概念（深掘り余地あり）
 {stubs_text}
 
+## 直近実行済みクエリ（これらの言い換え/再投稿は避けること）
+{avoid_text}
+
 ## 指示
 これらstub概念のうち、どれがゴール達成に重要か判断し、
 深掘りのための検索クエリ3〜5件と知識ギャップ2〜4件を提案してください。
 
+**多様性制約（厳守）**:
+- 上記の直近実行済みクエリと同一概念の表層を再度検索しないこと
+- 各クエリは次の3つの探索軸のいずれかに明示的に紐づけること:
+  1. `implementation` — 実装詳細・コード例・具体API
+  2. `operations` — 運用・監視・障害事例・本番経験談
+  3. `alternatives` — 代替手段・比較記事・トレードオフ分析
+- 3件以上生成する場合は少なくとも2軸をカバーすること
 - 検索クエリは2025-2026年の最新情報を重視
-- 同じ概念の表面情報ではなく、実装詳細・運用知見・代替手段を狙う
-- 日本語と英語を混ぜて幅広く
+- 日本語と英語を混ぜて幅広く（ASCII主体の英語クエリは search_lang を "en" にすること）
 
 出力JSON形式（このスキーマ厳守）:
 {{
   "hints": [
-    {{"query": "検索クエリ", "search_lang": "ja", "target_concept": "概念slug", "why": "なぜ重要か(1行)"}}
+    {{"query": "検索クエリ", "search_lang": "ja|en", "target_concept": "概念slug", "axis": "implementation|operations|alternatives", "why": "なぜ重要か(1行)"}}
   ],
   "knowledge_gaps": ["不足している知識領域(短文)"]
 }}""",
         },
     ]
 
-    result = _chat_json(messages, temperature=0.4, max_tokens=2048)
+    # temperature 0.6: 多様性を上げる。Phase 1 の 0.4 では言い換えに留まり
+    # 「同じ記事」を再取得する傾向が実測されたため引き上げる。
+    result = _chat_json(messages, temperature=0.6, max_tokens=2048)
     if not isinstance(result, dict):
         return None
     if "hints" not in result or not isinstance(result["hints"], list):
@@ -175,6 +193,7 @@ def generate_hints_for_objective(obj: Objective, related_stubs: list[dict]) -> d
             "query": q,
             "search_lang": str(h.get("search_lang", obj.language)),
             "target_concept": str(h.get("target_concept", "")),
+            "axis": str(h.get("axis", "")),
             "why": str(h.get("why", "")),
         })
     if not cleaned_hints:

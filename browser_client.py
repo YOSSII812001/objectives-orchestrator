@@ -35,6 +35,30 @@ logger = logging.getLogger(__name__)
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
+
+def _auto_correct_lang(query: str, lang: str) -> str:
+    """クエリ本文と search_lang の整合性を自動補正。
+
+    Phase 2: 英語クエリに `search_lang='ja'` が付くと Brave が 422 を返すことが
+    実測されている（query_history.json にも 422 エントリが複数存在）。
+    日本語文字（ひらがな/カタカナ/漢字）を含まず、ASCII 比率が 70% 以上なら
+    `lang='en'` に強制する軽い検証。
+    """
+    if not query:
+        return lang
+    has_jp = any(
+        "぀" <= c <= "ヿ"  # ひらがな・カタカナ
+        or "一" <= c <= "鿿"  # CJK 漢字
+        for c in query
+    )
+    if has_jp:
+        return lang  # 日本語含むので元のまま
+    ascii_ratio = sum(1 for c in query if ord(c) < 128) / len(query)
+    if ascii_ratio >= 0.7 and lang == "ja":
+        logger.info("クエリ言語補正: '%s' は英語優勢 → ja → en", query[:60])
+        return "en"
+    return lang
+
 if not BRAVE_API_KEY:
     logger.warning(
         "BRAVE_API_KEY が未設定です。.env に BRAVE_API_KEY=<your key> を追加してください。"
@@ -55,10 +79,13 @@ def search_google(query: str, lang: str = "ja") -> SearchBatch:
         logger.info("クエリスキップ（クールダウン中）: %s", query)
         return SearchBatch(status="cooldown")
 
+    # 言語自動補正: 422 削減（Phase 2）
+    effective_lang = _auto_correct_lang(query, lang)
+
     params = {
         "q": query,
         "count": 10,
-        "search_lang": lang,
+        "search_lang": effective_lang,
         "freshness": "py",  # past year
     }
     headers = {

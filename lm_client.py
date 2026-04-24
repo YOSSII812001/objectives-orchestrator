@@ -307,14 +307,18 @@ def check_server() -> bool:
 
 def wait_for_server(max_wait: int = 120) -> bool:
     """サーバーが応答するまでポーリング。"""
+    # 初回即チェック: 完全停止時に interval 待ちを避ける
+    if check_server():
+        logger.info("LM Studio APIサーバー稼働確認")
+        return True
     start = time.time()
     interval = 2
     while time.time() - start < max_wait:
+        time.sleep(interval)
         if check_server():
-            logger.info("LM Studio APIサーバー稼働確認")
+            logger.info("LM Studio APIサーバー稼働確認 (%ds待機後)", int(time.time() - start))
             return True
         logger.debug("LM Studio待機中... (%ds経過)", int(time.time() - start))
-        time.sleep(interval)
         interval = min(interval * 2, 15)
-    logger.error("LM Studioサーバー応答タイムアウト (%ds)", max_wait)
+    logger.warning("LM Studioサーバー応答タイムアウト (%ds) - 未起動の可能性", max_wait)
     return False

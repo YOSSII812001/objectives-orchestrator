@@ -80,9 +80,11 @@ def run_cycle():
         return 0
 
     try:
-        # LM Studio サーバー確認
-        if not wait_for_server():
-            logger.error("LM Studioサーバーに接続できません。サイクル中断。")
+        # LM Studio サーバー確認（早期スキップ: 30秒で見切る）
+        # 完全停止時に120秒空回りするログノイズを抑止。起動中（LM Studio GUI 起動直後）
+        # も 30 秒あればモデルロードが間に合うケースが多い。
+        if not wait_for_server(max_wait=30):
+            logger.info("LM Studio 未応答 → サイクル早期スキップ (lm_studio_down, 30s待機後)")
             return 0
 
         # Gap分析（GAP_ANALYSIS_INTERVAL_HOURS 経過時のみ実行）
@@ -191,6 +193,13 @@ def run_cycle():
 
             cycle_new_results = 0
             batch_statuses: list[str] = []
+            # C1: ドメイン多様性ペナルティ用カウンタ（サイクル内で同ドメイン採用数を追跡）
+            accepted_domains: dict[str, int] = {}
+            DOMAIN_PENALTY_THRESHOLD = 2   # この数以上採用済みなら
+            DOMAIN_PENALTY_POINTS = 2      # スコアを -2
+            from urllib.parse import urlparse as _urlparse
+            # D1: KPI 用の discovered カウンタ（サイクル開始時の url 記録件数をスナップショット）
+            pre_url_count = len(tracker.data.get("urls", {}))
 
             for q in queries:
                 query_text = q.get("query", str(q))
@@ -229,6 +238,18 @@ def run_cycle():
                         continue
 
                     score = score_result.get("score", 0)
+
+                    # C1: 同サイクル内で同ドメインが既に2件以上採用されていたらペナルティ
+                    domain = (_urlparse(url).netloc or "").lower()
+                    domain_count = accepted_domains.get(domain, 0)
+                    if domain and domain_count >= DOMAIN_PENALTY_THRESHOLD:
+                        original_score = score
+                        score = max(0, score - DOMAIN_PENALTY_POINTS)
+                        logger.info(
+                            "ドメイン多様性ペナルティ: %s (%d件採用済) %d→%d",
+                            domain, domain_count, original_score, score,
+                        )
+
                     tracker.set_stage(normalized, "scored", score=score)
 
                     if score < RELEVANCE_THRESHOLD:
@@ -262,6 +283,9 @@ def run_cycle():
                         tracker.set_stage(normalized, "inbox_written", inbox_filename=inbox_path.name)
                         accepted += 1
                         cycle_new_results += 1
+                        # C1: ドメインカウンタ更新（採用成功時のみ）
+                        if domain:
+                            accepted_domains[domain] = accepted_domains.get(domain, 0) + 1
 
                     # 目的あたりの上限チェック
                     if cycle_new_results >= obj.max_results_per_cycle:
@@ -286,10 +310,41 @@ def run_cycle():
 
             tracker.finish_cycle(cycle_new_results, zero_reason=final_zero_reason)
             total_inbox_written += cycle_new_results
+
+            # D1: KPI 記録（Phase 2）
+            try:
+                from kpi_tracker import record_cycle as _kpi_record
+                post_url_count = len(tracker.data.get("urls", {}))
+                discovered_this_cycle = max(0, post_url_count - pre_url_count)
+                _kpi_record(
+                    obj.id,
+                    batch_statuses=batch_statuses,
+                    queries_total=len(queries),
+                    accepted=cycle_new_results,
+                    discovered=discovered_this_cycle,
+                    accepted_domains=accepted_domains,
+                    zero_reason=final_zero_reason,
+                )
+            except Exception:
+                logger.exception("KPI 記録中に例外（サイクルは継続）")
+
             logger.info(
                 "=== 目的処理完了: %s - 新規%d件 (statuses=%s, zero_reason=%s) ===",
                 obj.title, cycle_new_results, batch_statuses, final_zero_reason,
             )
+
+        # E1: Objective 自己更新ドラフト方式（Phase 2）
+        # 各objectiveのKPIトレンドに基づいて、NG判定時のみドラフトを生成する。
+        # 実際の objective.md は書き換えない — state/objective-drafts/ に保存するだけ。
+        try:
+            from objective_drafter import maybe_generate_drafts
+            drafter_stats = maybe_generate_drafts()
+            if drafter_stats.get("drafted", 0) > 0:
+                logger.info("Objectiveドラフト: %s", drafter_stats)
+            else:
+                logger.debug("Objectiveドラフト: %s", drafter_stats)
+        except Exception:
+            logger.exception("Objectiveドラフト生成中に例外（サイクルは継続）")
 
         # サイクルサマリー
         inbox_count = len(list(INBOX_DIR.glob("*.md"))) if INBOX_DIR.exists() else 0
@@ -315,6 +370,20 @@ def run_auto_ingest(dry_run: bool = False):
     try:
         stats = run_ingest(dry_run=dry_run)
         logger.info("========== ローカルIngest完了: %s ==========", stats)
+
+        # D1: Ingest 後に concept_delta_rate を KPI へ反映（Phase 2）
+        # 複数 active objective 時は直近 accepted>0 の全 objective に同じ delta を割り当てる
+        # （厳密な per-objective 分離は Phase E 以降で改善）。
+        if stats and not dry_run:
+            try:
+                from kpi_tracker import update_concept_delta
+                from objectives import load_objectives
+                delta = int(stats.get("concepts_created", 0))
+                for obj in load_objectives():
+                    update_concept_delta(obj.id, delta)
+            except Exception:
+                logger.exception("concept_delta 反映中に例外（Ingest自体は完了済）")
+
         return stats
     except Exception:
         logger.exception("ローカルIngest中に未処理例外が発生")

@@ -24,17 +24,30 @@
 - [ ] `py main.py --gap-only --force` で Gap 分析を強制実行し、新 hints が生成されるか確認
 - [ ] `py main.py` で通常サイクルを手動1回実行し、ログに `zero_reason` が出るか、`consecutive_zero_results` が誤増加しないか確認
 
-### Phase 2 以降（後続セッション）
-- [ ] gap_analyzer.py: temperature 0.4 → 0.6、プロンプトに直近ユニーク10件＋探索軸制約
-- [ ] browser_client.py: search_lang 検証（英語クエリに ja を付けない）
+### Phase 2 (2026-04-24 実装完了)
+- [x] **A1** LM Studio 未応答時の早期スキップ（120s→30s、ログ1行集約）
+- [x] **B1** gap_analyzer.py: temperature 0.4 → 0.6、avoid-list（直近ユニーク10）、探索軸3分類（implementation/operations/alternatives）
+- [x] **B2** browser_client.py: `_auto_correct_lang` で英語クエリに ja→en 自動補正（422削減）
+- [x] **C1** main.py: サイクル内ドメイン多様性ペナルティ（同ドメイン 2件以上採用済で -2点）
+- [x] **D1** kpi_tracker.py 新設: 5指標を `state/kpi/<objective_id>.jsonl` 追記
+      (effective_query_rate / useful_source_rate / novel_domain_rate / stagnation_hours / concept_delta_rate)
+- [x] **E1** objective_drafter.py 新設: KPI NG判定時のみ `state/objective-drafts/` に改訂案。直接書き換えなし
+
+### Phase 2 検証
+- [x] 全モジュール import OK
+- [x] `recent_unique_queries(limit=5, ok_only=True)` が正しい順序で返却
+- [x] `_auto_correct_lang` が日英混在を正しく判定
+- [x] `kpi_tracker.record_cycle` → `update_concept_delta` が連携動作
+- [x] LM Studio停止下で `py main.py` が30s待機→早期スキップで完了（50s、以前は125s）
+- [ ] LM Studio 稼働下での End-to-Endテスト（ユーザーが LM Studio 起動後の 20:00 Task Scheduler 実行で検証）
+
+### Phase 3 以降（後続検討）
 - [ ] 10:00 の PermissionError 原因調査（state_manager.save の排他）
-- [ ] score_relevance に domain diversity penalty
 - [ ] URL重複判定にタイトル類似度
-- [ ] KPI計測: effective_query_rate / useful_source_rate / concept_delta_rate / novel_domain_rate / stagnation_hours
 - [ ] sources_created を重複スキップ除外版に修正
-- [ ] state/objective-drafts/ ドラフト方式で objective 自己更新
-- [ ] active objective 2-3個化
+- [ ] active objective 2-3個化（E1で複数対応したが、新 objective の追加は未）
 - [ ] RSS/HN/ArXiv ソース追加（diversity penalty の後で優先度再判定）
+- [ ] drafter の LLM 呼び出しで n_ctx 4096 の制約と相性確認（長文 objective.md でプロンプト溢れ懸念）
 
 ## 公開済みロードマップ（既存）
 

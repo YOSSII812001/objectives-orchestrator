@@ -69,6 +69,36 @@ def should_skip(query: str, cooldown_hours: int = QUERY_COOLDOWN_HOURS) -> bool:
     return last > threshold
 
 
+def recent_unique_queries(limit: int = 10, ok_only: bool = True) -> list[str]:
+    """直近のユニーククエリを新しい順に返す。
+
+    Phase 2 で Gap 分析プロンプトの avoid-list として使う。
+    ok_only=True のとき status != "ok" （422/error）は除外する。
+    422 はそもそも「質の悪いクエリ形状」のサインで再提案候補ではあるため。
+    """
+    data = _load()
+    entries = []
+    for key, entry in data.items():
+        if ok_only and entry.get("status", "ok") != "ok":
+            continue
+        if "query" not in entry or "last_executed_at" not in entry:
+            continue
+        entries.append(entry)
+    entries.sort(key=lambda e: e.get("last_executed_at", ""), reverse=True)
+    seen: set[str] = set()
+    result: list[str] = []
+    for e in entries:
+        q = str(e["query"]).strip()
+        norm = q.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        result.append(q)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def record(query: str, result_count: int, status: str = "ok") -> None:
     """クエリ実行結果を記録。
 

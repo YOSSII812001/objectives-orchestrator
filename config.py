@@ -79,3 +79,12 @@ GAP_ANALYSIS_INTERVAL_HOURS = 6  # gap分析の最小間隔
 
 # === クエリ実行履歴 ===
 QUERY_COOLDOWN_HOURS = 6  # 同一クエリの再実行を抑制する時間（時間）
+
+# === Phase 2: Objective 自己更新ドラフト ===
+# `state/objective-drafts/` に改訂案を書き出す（直接適用はしない）。
+# 健康度がNGと判定された時のみ LLM 呼び出しが走る。
+OBJECTIVE_DRAFTS_DIR = STATE_DIR / "objective-drafts"
+DRAFTER_INTERVAL_HOURS = 24                # 最低実行間隔
+DRAFTER_STAGNATION_HOURS_THRESHOLD = 24.0  # 停滞と判定するKPI閾値
+DRAFTER_NOVEL_DOMAIN_RATE_THRESHOLD = 0.2  # 新規ドメイン率がこれ未満で連続時NG
+DRAFTER_CONSECUTIVE_NG_CYCLES = 3          # NGが何サイクル連続したらドラフト生成するか
