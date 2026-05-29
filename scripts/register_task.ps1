@@ -29,16 +29,20 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 55)
 
-$Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+# LogonType S4U = "run whether the user is logged on or not" WITHOUT storing a
+# password. The task then runs in a non-interactive session, so NO console
+# window pops up every hour. It can still reach LM Studio on localhost.
+$Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
 
 Register-ScheduledTask -TaskName $TaskName `
     -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal `
-    -Description "Objectives Orchestrator hourly run" -Force | Out-Null
+    -Description "Objectives Orchestrator hourly run (silent)" -Force | Out-Null
 
 Write-Host "[OK] Task registered: $TaskName"
 Write-Host "  Start at : $StartAt"
 Write-Host "  Interval : 1 hour"
 Write-Host "  Action   : $BatPath"
+Write-Host "  Mode     : silent (S4U, no console window)"
 Write-Host ""
 Write-Host "Inspect   : schtasks /query /tn $TaskName /v /fo LIST"
 Write-Host "Run now   : schtasks /run   /tn $TaskName"

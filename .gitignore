@@ -40,6 +40,7 @@ ENV/
 state/cycle.lock
 state/query_history.json
 state/gap_analysis_state.json
+state/objective_drafter_state.json
 state/progress/*
 !state/progress/.gitkeep
 state/judge_reports/*
@@ -48,6 +49,8 @@ state/observation_reports/*
 !state/observation_reports/.gitkeep
 state/search-hints/*
 !state/search-hints/.gitkeep
+state/kpi/
+state/objective-drafts/
 
 # --- ログ ---
 logs/*.log
